@@ -1,0 +1,944 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<title>1444a</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box;user-select:none;-webkit-user-select:none;-webkit-tap-highlight-color:transparent}
+  html,body{background:#0a0a0c;height:100%;overflow:hidden;touch-action:none}
+  #app{position:fixed;inset:0}
+  canvas{display:block;width:100%;height:100%;touch-action:none}
+  #startBtn{
+    position:absolute;inset:0;background:transparent;border:none;cursor:pointer;z-index:10;
+    -webkit-tap-highlight-color:transparent;
+    display:flex;align-items:center;justify-content:center;
+  }
+  #startBtn.hidden{display:none}
+  #startBtn svg{
+    width:140px;height:140px;
+    fill:none;stroke:#8a8a8a;stroke-width:1.6;
+    stroke-linecap:round;stroke-linejoin:round;
+    animation:startPulse 2.6s ease-in-out infinite;
+    transition:transform 0.15s cubic-bezier(0.34, 1.56, 0.64, 1);
+  }
+  #startBtn.pressed svg{transform:scale(0.85)}
+  #startBtn.fading svg{animation:none;opacity:0;transition:opacity 0.6s ease}
+  @keyframes startPulse{
+    0%,100%{opacity:0.35}
+    50%{opacity:0.85}
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <canvas id="gameCanvas"></canvas>
+  <button id="startBtn">
+    <svg viewBox="0 0 24 24">
+      <path d="M4 9 L4 4 L9 7.5"/>
+      <path d="M20 9 L20 4 L15 7.5"/>
+      <circle cx="12" cy="14" r="7"/>
+      <path d="M7.5 13 l3 1"/>
+      <path d="M16.5 13 l-3 1"/>
+      <path d="M2 13 h3 M2 15 h3 M22 13 h-3 M22 15 h-3"/>
+    </svg>
+  </button>
+</div>
+
+<script>
+"use strict";
+const CV = document.getElementById('gameCanvas');
+const CX = CV.getContext('2d');
+const startBtn = document.getElementById('startBtn');
+let VW = 0, VH = 0, DPR = 1;
+function resize(){
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  VW = CV.clientWidth;
+  VH = CV.clientHeight;
+  CV.width = Math.round(VW * DPR);
+  CV.height = Math.round(VH * DPR);
+  CX.setTransform(DPR, 0, 0, DPR, 0, 0);
+}
+window.addEventListener('resize', resize);
+window.addEventListener('orientationchange', () => setTimeout(resize, 200));
+resize();
+
+const PAL = {
+  good:'#4a4a4a', great:'#e0e0e0', cursor:'#cccccc',
+  bgGlow:'rgba(80,80,80,0.05)',
+  warnGlow:'rgba(140,140,140,'
+};
+const STORM_PAL = {
+  good:'#8a6a2a', great:'#f0d090', cursor:'#ddc080',
+  bgGlow:'rgba(180,140,40,0.10)',
+  warnGlow:'rgba(220,180,80,'
+};
+const MERCI_PAL = {
+  good:'#7a0a0a', great:'#ff3030', cursor:'#ff5050',
+  bgGlow:'rgba(200,20,20,0.14)',
+  warnGlow:'rgba(255,40,40,'
+};
+
+const GREAT_W = 0.02875;
+const GOOD_W = 0.16;
+const WARN_TIME = 0.5;
+const CURSOR_SPEED = (1 / 1.1) * 0.93;
+const STORM_CHECKS = 11;
+const MERCI_CHECKS = 25;
+const MERCI_SPEED_MULT = 1.3;
+const MERCI_ZOOM = 0.10;
+const MERCI_ROT_DEG = 8;
+const MERCI_TRIGGER_MISSES = 3;
+const MIN_INTERVAL = 0.8;
+const MAX_INTERVAL = 1.8;
+const FADE_IN_TIME = 0.12;
+const FADE_OUT_TIME = 0.2;
+const STORM_GOOD_MIN = 7;
+const STORM_GOOD_MAX = 10;
+const STORM_GREAT_BETWEEN_MAX = 5;
+const STORM_FAIL_STREAK = 3;
+const STORM_TOTAL_EVERY = 20;
+const TRAIL_LENGTH = 3;
+const ARROW_BACK = 14;
+const ARROW_FORWARD = 10;
+const ARROW_WIDTH = 2;
+const ZONE_THICK = 16;
+const HOLD_TIME = 0.45;
+const NORMAL_SPEED_MIN = 0.98;
+const NORMAL_SPEED_MAX = 1.02;
+
+const G = {
+  phase: 'boot',
+  checks: 0, fails: 0, greats: 0, goods: 0, streak: 0, bestStreak: 0,
+  cursorAngle: 0, cursorSpeed: 0, cursorActive: false, cursorTravel: 0,
+  zStart: 0, gStart: 0, zoneAlpha: 0, zoneTargetAlpha: 0,
+  result: null,
+  holdTimer: 0, holdAngle: 0,
+  warnTimer: 0, warnActive: false, nextCheckTimer: 0, paused: false, pauseTimer: 0,
+  storm: false, stormLeft: 0, stormFlash: 0,
+  merciStorm: false, merciLeft: 0, merciProgress: 0, merciRotationDir: 0,
+  stormMissStreak: 0, pendingMerci: false,
+  goodStreak: 0, greatBetweenGoods: 0, failStreak: 0, checksSinceStorm: 0,
+  shake: 0, flash: 0, flashColor: 0,
+  hitFlashRed: 0,
+  failPoint: 0,
+  failCursorAngle: 0, failCursorVx: 0, failCursorVy: 0,
+  failCursorRot: 0, failCursorAlpha: 1, failCursorActive: false,
+  shards: [], particles: [], pulses: [], trail: [],
+  time: 0, lastZoneStart: -1,
+  tapCooldown: 0,
+  stormEndFade: false,
+};
+
+function getPal(){
+  if(G.merciStorm || G.pendingMerci) return MERCI_PAL;
+  return G.storm ? STORM_PAL : PAL;
+}
+function getGoodW(){ return G.merciStorm ? GOOD_W * 0.5 : GOOD_W; }
+function getGreatW(){ return G.merciStorm ? GREAT_W * 0.5 : GREAT_W; }
+
+function pulse(r, color){
+  G.pulses.push({x: VW/2, y: VH/2, r: r*0.3, maxR: r, color, life: 0.4, maxLife: 0.4});
+}
+
+function spawnShards(){
+  const pal = getPal();
+  const cx = VW/2, cy = VH/2;
+  const R = Math.min(VW, VH) * 0.24;
+  const failAngle = G.failPoint - Math.PI/2;
+
+  for(let i = 0; i < 18; i++){
+    const a = failAngle + (Math.random() - 0.5) * Math.PI * 1.5;
+    const speed = 80 + Math.random() * 220;
+    const onRing = Math.random() < 0.7;
+    G.shards.push({
+      x: cx + Math.cos(failAngle) * R * (0.5 + Math.random() * 0.5),
+      y: cy + Math.sin(failAngle) * R * (0.5 + Math.random() * 0.5),
+      vx: Math.cos(a) * speed, vy: Math.sin(a) * speed - 20,
+      rot: Math.random() * Math.PI * 2,
+      rotSpeed: (Math.random() - 0.5) * 15,
+      size: 3 + Math.random() * 6, length: 6 + Math.random() * 14,
+      life: 0.5 + Math.random() * 0.2, maxLife: 0.7,
+      color: onRing ? (Math.random() < 0.4 ? pal.great : pal.good) : pal.cursor,
+    });
+  }
+  for(let i = 0; i < 10; i++){
+    const a = Math.random() * Math.PI * 2;
+    const speed = 60 + Math.random() * 140;
+    G.shards.push({
+      x: cx + Math.cos(a) * R, y: cy + Math.sin(a) * R,
+      vx: Math.cos(a) * speed, vy: Math.sin(a) * speed,
+      rot: a + Math.PI/2, rotSpeed: (Math.random() - 0.5) * 8,
+      size: 2 + Math.random() * 4, length: 4 + Math.random() * 10,
+      life: 0.4 + Math.random() * 0.2, maxLife: 0.6,
+      color: Math.random() < 0.5 ? pal.good : pal.great,
+    });
+  }
+}
+
+function checkStormTrigger(){
+  if(G.storm || G.merciStorm || G.pendingMerci) return false;
+  if(G.goodStreak >= STORM_GOOD_MIN &&
+     G.goodStreak <= STORM_GOOD_MAX + 5 &&
+     G.greatBetweenGoods < STORM_GREAT_BETWEEN_MAX) return true;
+  if(G.failStreak >= STORM_FAIL_STREAK) return true;
+  if(G.checksSinceStorm >= STORM_TOTAL_EVERY) return true;
+  return false;
+}
+
+function triggerStorm(){
+  G.storm = true;
+  G.stormLeft = STORM_CHECKS;
+  G.stormFlash = 0.8;
+  G.goodStreak = 0;
+  G.greatBetweenGoods = 0;
+  G.failStreak = 0;
+  G.checksSinceStorm = 0;
+  G.zoneAlpha = 0;
+  G.zoneTargetAlpha = 0;
+  G.holdTimer = 0;
+  G.result = null;
+  G.cursorActive = false;
+  G.cursorAngle = 0;
+  G.cursorTravel = 0;
+  G.cursorSpeed = CURSOR_SPEED;
+  G.stormEndFade = false;
+}
+
+function triggerMerciStorm(){
+  G.merciStorm = true;
+  G.merciLeft = MERCI_CHECKS;
+  G.merciProgress = 0;
+  G.merciRotationDir = Math.random() < 0.5 ? -1 : 1;
+  G.stormMissStreak = 0;
+  G.goodStreak = 0;
+  G.greatBetweenGoods = 0;
+  G.failStreak = 0;
+  G.checksSinceStorm = 0;
+  G.zoneAlpha = 0;
+  G.zoneTargetAlpha = 0;
+  G.holdTimer = 0;
+  G.result = null;
+  G.cursorActive = false;
+  G.cursorAngle = 0;
+  G.cursorTravel = 0;
+  G.cursorSpeed = CURSOR_SPEED * MERCI_SPEED_MULT;
+  G.stormEndFade = false;
+  G.stormFlash = 1.0;
+}
+
+function endStorm(){
+  G.storm = false;
+  G.stormLeft = 0;
+  G.stormMissStreak = 0;
+  G.stormEndFade = true;
+  G.cursorActive = false;
+  G.zoneTargetAlpha = 0;
+  G.result = null;
+  G.tapCooldown = 0.3;
+}
+
+function endMerciStorm(){
+  G.merciLeft = 0;
+  G.stormMissStreak = 0;
+  G.stormEndFade = true;
+  G.cursorActive = false;
+  G.zoneTargetAlpha = 0;
+  G.result = null;
+  G.tapCooldown = 0.3;
+}
+
+function finishStormFade(){
+  G.stormEndFade = false;
+  G.merciStorm = false;
+  G.merciProgress = 0;
+  G.merciRotationDir = 0;
+  G.cursorSpeed = CURSOR_SPEED;
+  G.nextCheckTimer = randInterval();
+}
+
+function manualStorm(){
+  if(G.phase !== 'playing') return;
+  if(G.storm || G.merciStorm || G.pendingMerci) return;
+  G.cursorActive = false;
+  G.zoneAlpha = 0;
+  G.zoneTargetAlpha = 0;
+  G.holdTimer = 0;
+  G.result = null;
+  G.paused = false;
+  triggerStorm();
+  G.warnActive = true;
+  G.warnTimer = WARN_TIME;
+}
+
+function calculateZone(){
+  const goodW = getGoodW();
+  const greatW = getGreatW();
+  const minStart = Math.PI * 0.5;
+  const maxStart = Math.PI * 1.7;
+  const range = maxStart - minStart - goodW * Math.PI * 2;
+
+  let zStart;
+  let attempts = 0;
+  do {
+    zStart = minStart + Math.random() * Math.max(0, range);
+    attempts++;
+  } while (G.lastZoneStart >= 0 &&
+           Math.abs(zStart - G.lastZoneStart) < Math.PI * 0.35 &&
+           attempts < 20);
+
+  G.lastZoneStart = zStart;
+  G.zStart = zStart;
+  G.gStart = zStart + goodW * Math.PI * 2 - greatW * Math.PI * 2;
+
+  if(G.gStart + greatW * Math.PI * 2 > Math.PI * 2){
+    const overflow = G.gStart + greatW * Math.PI * 2 - Math.PI * 2;
+    G.zStart -= overflow;
+    G.gStart -= overflow;
+    G.lastZoneStart = G.zStart;
+  }
+}
+
+function calculateStormZone(cursorPos){
+  const goodW = getGoodW();
+  const greatW = getGreatW();
+  const goodRange = goodW * Math.PI * 2;
+  const minAhead = Math.PI * 0.4;
+  const maxAhead = Math.PI * 1.6;
+
+  const ahead = minAhead + Math.random() * (maxAhead - minAhead);
+  let zStart = cursorPos + ahead;
+
+  while(zStart > Math.PI * 2) zStart -= Math.PI * 2;
+  while(zStart < 0) zStart += Math.PI * 2;
+
+  G.zStart = zStart;
+  G.gStart = zStart + goodRange - greatW * Math.PI * 2;
+
+  if(G.gStart > Math.PI * 2) G.gStart -= Math.PI * 2;
+  if(G.gStart < 0) G.gStart += Math.PI * 2;
+}
+
+function startCheck(resetCursor){
+  calculateZone();
+  if(resetCursor || (!G.storm && !G.merciStorm)){
+    G.cursorAngle = 0;
+    if(G.merciStorm){
+      G.cursorSpeed = CURSOR_SPEED * MERCI_SPEED_MULT;
+    } else if(G.storm){
+      G.cursorSpeed = CURSOR_SPEED;
+    } else {
+      G.cursorSpeed = CURSOR_SPEED * (NORMAL_SPEED_MIN + Math.random() * (NORMAL_SPEED_MAX - NORMAL_SPEED_MIN));
+    }
+    G.cursorTravel = 0;
+    G.trail = [];
+  }
+  G.result = null;
+  G.holdTimer = 0;
+  G.cursorActive = true;
+  G.warnActive = false;
+  G.warnTimer = 0;
+  G.zoneAlpha = 0;
+  G.zoneTargetAlpha = 1;
+  G.checks++;
+  G.checksSinceStorm++;
+}
+
+function nextStormCheck(){
+  const pos = ((G.cursorAngle % (Math.PI*2)) + Math.PI*2) % (Math.PI*2);
+  calculateStormZone(pos);
+  G.cursorTravel = 0;
+  G.zoneAlpha = 1;
+  G.zoneTargetAlpha = 1;
+  G.checks++;
+  G.checksSinceStorm++;
+  G.result = null;
+  G.tapCooldown = 0.1;
+}
+
+function resolveCheck(){
+  if(!G.cursorActive || G.result) return;
+  if(G.tapCooldown > 0) return;
+
+  const pos = ((G.cursorAngle % (Math.PI*2)) + Math.PI*2) % (Math.PI*2);
+  const goodW = getGoodW();
+  const greatW = getGreatW();
+
+  let inGreat, inGood;
+
+  if(G.storm || G.merciStorm){
+    const zStartNorm = ((G.zStart % (Math.PI*2)) + Math.PI*2) % (Math.PI*2);
+    const gStartNorm = ((G.gStart % (Math.PI*2)) + Math.PI*2) % (Math.PI*2);
+    const goodEnd = zStartNorm + goodW * Math.PI * 2;
+    const greatEnd = gStartNorm + greatW * Math.PI * 2;
+
+    if(goodEnd <= Math.PI * 2){
+      inGood = pos >= zStartNorm && pos <= goodEnd;
+    } else {
+      inGood = pos >= zStartNorm || pos <= goodEnd - Math.PI * 2;
+    }
+
+    if(greatEnd <= Math.PI * 2){
+      inGreat = pos >= gStartNorm && pos <= greatEnd;
+    } else {
+      inGreat = pos >= gStartNorm || pos <= greatEnd - Math.PI * 2;
+    }
+  } else {
+    inGreat = pos >= G.gStart && pos <= G.gStart + greatW * Math.PI * 2;
+    inGood = pos >= G.zStart && pos <= G.zStart + goodW * Math.PI * 2;
+  }
+
+  if(inGreat){
+    G.result = 'great';
+    G.streak++;
+    if(G.streak > G.bestStreak) G.bestStreak = G.streak;
+    G.greats++;
+    G.failStreak = 0;
+    if(!G.storm && !G.merciStorm) G.greatBetweenGoods++;
+
+    if(G.storm){
+      G.stormLeft--;
+      if(G.stormLeft <= 0) endStorm();
+      else nextStormCheck();
+    } else if(G.merciStorm){
+      G.merciLeft--;
+      if(G.merciLeft <= 0) endMerciStorm();
+      else nextStormCheck();
+    } else {
+      G.holdTimer = HOLD_TIME;
+      G.holdAngle = G.cursorAngle;
+      G.cursorActive = false;
+      G.tapCooldown = 0.3;
+    }
+  } else if(inGood){
+    G.result = 'good';
+    G.streak = 0;
+    G.goods++;
+    G.failStreak = 0;
+    if(!G.storm && !G.merciStorm) G.goodStreak++;
+
+    if(G.storm){
+      G.stormLeft--;
+      if(G.stormLeft <= 0) endStorm();
+      else nextStormCheck();
+    } else if(G.merciStorm){
+      G.merciLeft--;
+      if(G.merciLeft <= 0) endMerciStorm();
+      else nextStormCheck();
+    } else {
+      G.holdTimer = HOLD_TIME;
+      G.holdAngle = G.cursorAngle;
+      G.cursorActive = false;
+      G.tapCooldown = 0.3;
+    }
+  } else {
+    doFail();
+    return;
+  }
+}
+
+function doFail(){
+  const pal = getPal();
+  const pos = ((G.cursorAngle % (Math.PI*2)) + Math.PI*2) % (Math.PI*2);
+  G.failPoint = pos;
+  G.result = 'fail';
+  G.streak = 0;
+  G.fails++;
+  G.shake = 14;
+  G.flash = 0.3; G.flashColor = 1;
+  G.hitFlashRed = 0.35;
+  pulse(90, pal.cursor);
+  spawnShards();
+
+  G.failCursorAngle = G.cursorAngle;
+  G.failCursorActive = true;
+  G.failCursorAlpha = 1;
+  const flyAngle = Math.random() * Math.PI * 2;
+  G.failCursorVx = Math.cos(flyAngle) * 180;
+  G.failCursorVy = Math.sin(flyAngle) * 180;
+  G.failCursorRot = 0;
+
+  G.cursorActive = false;
+  G.zoneAlpha = 0;
+  G.zoneTargetAlpha = 0;
+  G.holdTimer = 0;
+  G.paused = true;
+  G.pauseTimer = 1.0;
+  G.failStreak++;
+  G.goodStreak = 0;
+  G.greatBetweenGoods = 0;
+  G.tapCooldown = 0.3;
+  G.stormEndFade = false;
+
+  if(G.storm){
+    G.stormMissStreak++;
+    G.storm = false;
+    G.stormLeft = 0;
+    G.stormFlash = 0.5;
+    if(G.stormMissStreak >= MERCI_TRIGGER_MISSES){
+      G.pendingMerci = true;
+    }
+  }
+  if(G.merciStorm){
+    G.merciStorm = false;
+    G.merciLeft = 0;
+    G.merciProgress = 0;
+    G.merciRotationDir = 0;
+  }
+}
+
+function update(dt){
+  G.time += dt;
+  if(G.phase === 'boot') return;
+
+  G.shake = Math.max(0, G.shake - dt * 50);
+  G.flash = Math.max(0, G.flash - dt * 3);
+  G.stormFlash = Math.max(0, G.stormFlash - dt * 1.5);
+  G.hitFlashRed = Math.max(0, G.hitFlashRed - dt * 4);
+  G.tapCooldown = Math.max(0, G.tapCooldown - dt);
+
+  if(G.merciStorm && G.merciLeft > 0){
+    G.merciProgress = Math.max(0, 1 - (G.merciLeft / MERCI_CHECKS));
+  }
+
+  if(G.holdTimer > 0){
+    G.holdTimer -= dt;
+    if(G.holdTimer <= 0){
+      G.zoneTargetAlpha = 0;
+    }
+  }
+
+  if(G.zoneAlpha !== G.zoneTargetAlpha){
+    const dir = G.zoneTargetAlpha > G.zoneAlpha ? 1 : -1;
+    const rate = 1 / (G.zoneTargetAlpha > G.zoneAlpha ? FADE_IN_TIME : FADE_OUT_TIME);
+    G.zoneAlpha += dir * rate * dt;
+    G.zoneAlpha = Math.max(0, Math.min(1, G.zoneAlpha));
+  }
+
+  if(G.stormEndFade && G.zoneAlpha <= 0.001 && G.zoneTargetAlpha <= 0){
+    finishStormFade();
+  }
+
+  if(G.zoneAlpha <= 0.001 && G.zoneTargetAlpha <= 0 && G.result && G.result !== 'fail' && !G.stormEndFade){
+    G.result = null;
+    if(G.nextCheckTimer <= 0 || G.nextCheckTimer === undefined){
+      G.nextCheckTimer = randInterval();
+    }
+  }
+
+  G.pulses = G.pulses.filter(p => { p.life -= dt; p.r = p.r + (p.maxR - p.r) * Math.min(1, dt * 8); return p.life > 0; });
+  G.particles = G.particles.filter(p => { p.life -= dt; p.x += p.vx * dt; p.y += p.vy * dt; p.vx *= 0.94; p.vy *= 0.94; p.rot += p.rotSpeed * dt; return p.life > 0; });
+  G.shards = G.shards.filter(s => { s.life -= dt; s.x += s.vx * dt; s.y += s.vy * dt; s.vx *= 0.96; s.vy *= 0.96; s.vy += 20 * dt; s.rot += s.rotSpeed * dt; return s.life > 0; });
+
+  if(G.failCursorActive){
+    G.failCursorVx *= 0.94; G.failCursorVy *= 0.94;
+    G.failCursorRot += dt * 10;
+    G.failCursorAlpha = Math.max(0, G.failCursorAlpha - dt * 1.5);
+    if(G.failCursorAlpha <= 0) G.failCursorActive = false;
+  }
+
+  if(G.cursorActive && !G.result){
+    G.trail.unshift({angle: G.cursorAngle});
+    if(G.trail.length > TRAIL_LENGTH) G.trail.pop();
+  } else {
+    G.trail = [];
+  }
+
+  if(G.paused){
+    G.pauseTimer -= dt;
+    if(G.pauseTimer <= 0){
+      G.paused = false;
+      G.result = null;
+      if(G.pendingMerci){
+        G.pendingMerci = false;
+        triggerMerciStorm();
+        G.warnActive = true;
+        G.warnTimer = WARN_TIME;
+      } else if(checkStormTrigger()){
+        triggerStorm();
+        G.warnActive = true;
+        G.warnTimer = WARN_TIME;
+      } else {
+        G.nextCheckTimer = randInterval();
+      }
+    }
+    return;
+  }
+
+  if(G.warnActive){
+    G.warnTimer -= dt;
+    if(G.warnTimer <= 0){
+      G.warnActive = false;
+      startCheck(true);
+    }
+    return;
+  }
+
+  if(G.holdTimer > 0) return;
+
+  if(G.cursorActive){
+    if(G.result === 'great'){
+    } else if(G.result === 'good'){
+      G.cursorAngle += G.cursorSpeed * 0.3 * dt * Math.PI * 2;
+    } else {
+      G.cursorAngle += G.cursorSpeed * dt * Math.PI * 2;
+      G.cursorTravel += G.cursorSpeed * dt * Math.PI * 2;
+      if(G.cursorTravel >= Math.PI * 2){
+        doFail();
+      }
+    }
+    return;
+  }
+
+  if(G.result) return;
+  if(G.zoneAlpha > 0.01) return;
+  if(G.stormEndFade) return;
+
+  G.nextCheckTimer -= dt;
+  if(G.nextCheckTimer < 0) G.nextCheckTimer = 0;
+  if(G.nextCheckTimer <= 0){
+    if(G.storm && G.stormLeft > 0){
+      startCheck(false);
+    } else {
+      G.warnActive = true;
+      G.warnTimer = WARN_TIME;
+    }
+  }
+}
+
+function randInterval(){
+  return MIN_INTERVAL + Math.random() * (MAX_INTERVAL - MIN_INTERVAL);
+}
+
+function draw(){
+  CX.save();
+
+  if(G.shake > 0){
+    CX.translate((Math.random()-0.5)*G.shake, (Math.random()-0.5)*G.shake);
+  }
+
+  CX.fillStyle = '#0a0a0c';
+  CX.fillRect(-50, -50, VW + 100, VH + 100);
+
+  const cx = VW / 2;
+  const cy = VH / 2;
+
+  if(G.phase === 'boot'){ CX.restore(); return; }
+
+  if(G.merciStorm){
+    const t = G.merciProgress;
+    const zoom = 1 + MERCI_ZOOM * t;
+    const angle = G.merciRotationDir * (MERCI_ROT_DEG * Math.PI / 180) * t;
+    CX.translate(cx, cy);
+    CX.rotate(angle);
+    CX.scale(zoom, zoom);
+    CX.translate(-cx, -cy);
+  }
+
+  const genR = Math.min(VW, VH) * 0.10;
+  const R = Math.min(VW, VH) * 0.24;
+  const pal = getPal();
+
+  const glow = CX.createRadialGradient(cx, cy, genR * 0.5, cx, cy, genR + 100);
+  glow.addColorStop(0, pal.bgGlow);
+  glow.addColorStop(1, 'rgba(0,0,0,0)');
+  CX.fillStyle = glow;
+  CX.fillRect(cx - genR - 100, cy - genR - 100, genR*2 + 200, genR*2 + 200);
+
+  if(G.stormFlash > 0){
+    const t = G.stormFlash;
+    const flashColor = G.merciStorm
+      ? `rgba(255,60,60,${t * 0.5})`
+      : `rgba(220,170,50,${t * 0.4})`;
+    const flashGrad = CX.createRadialGradient(cx, cy, genR * 0.3, cx, cy, genR + 140);
+    flashGrad.addColorStop(0, flashColor);
+    flashGrad.addColorStop(1, 'rgba(0,0,0,0)');
+    CX.fillStyle = flashGrad;
+    CX.fillRect(-200, -200, VW + 400, VH + 400);
+  }
+
+  if(G.warnActive){
+    const t = 1 - G.warnTimer / WARN_TIME;
+    const glowR = genR * (0.6 + t * 0.9);
+    const alpha = (1 - t) * 0.5;
+    const warnGlow = CX.createRadialGradient(cx, cy, 0, cx, cy, glowR);
+    warnGlow.addColorStop(0, pal.warnGlow + (alpha * 0.6) + ')');
+    warnGlow.addColorStop(0.6, pal.warnGlow + (alpha * 0.2) + ')');
+    warnGlow.addColorStop(1, 'rgba(0,0,0,0)');
+    CX.beginPath();
+    CX.arc(cx, cy, glowR, 0, Math.PI*2);
+    CX.fillStyle = warnGlow;
+    CX.fill();
+  }
+
+  if(G.cursorActive || G.zoneAlpha > 0.01 || G.holdTimer > 0 || G.stormEndFade){
+    drawCheck(cx, cy, R);
+  }
+
+  for(const s of G.shards){
+    const a = s.life / s.maxLife;
+    CX.globalAlpha = a;
+    CX.fillStyle = s.color;
+    CX.save();
+    CX.translate(s.x, s.y);
+    CX.rotate(s.rot);
+    CX.fillRect(-s.size * 0.5, -s.length * 0.5, s.size, s.length);
+    CX.restore();
+  }
+  CX.globalAlpha = 1;
+
+  for(const p of G.pulses){
+    CX.globalAlpha = (p.life / p.maxLife) * 0.6;
+    CX.strokeStyle = p.color;
+    CX.lineWidth = 2;
+    CX.beginPath();
+    CX.arc(p.x, p.y, p.r, 0, Math.PI*2);
+    CX.stroke();
+  }
+  CX.globalAlpha = 1;
+
+  for(const p of G.particles){
+    const a = p.life / p.maxLife;
+    CX.globalAlpha = a * 0.85;
+    CX.fillStyle = p.color;
+    CX.save();
+    CX.translate(p.x, p.y);
+    CX.rotate(p.rot);
+    CX.fillRect(-p.size * a * 0.5, -p.size * a * 0.5, p.size * a, p.size * a);
+    CX.restore();
+  }
+  CX.globalAlpha = 1;
+
+  if(G.hitFlashRed > 0){
+    const vig = CX.createRadialGradient(cx, cy, genR * 0.5, cx, cy, Math.max(VW, VH) * 0.7);
+    vig.addColorStop(0, 'rgba(0,0,0,0)');
+    vig.addColorStop(1, `rgba(120,30,30,${G.hitFlashRed * 0.5})`);
+    CX.fillStyle = vig;
+    CX.fillRect(0, 0, VW, VH);
+  }
+
+  if(G.flash > 0){
+    const a = G.flash * 1.2;
+    if(G.flashColor === 0){
+      CX.fillStyle = G.storm || G.merciStorm
+        ? `rgba(150,120,40,${Math.min(0.2, a)})`
+        : `rgba(60,60,60,${Math.min(0.2, a)})`;
+    } else {
+      CX.fillStyle = `rgba(80,30,30,${Math.min(0.25, a)})`;
+    }
+    CX.fillRect(0, 0, VW, VH);
+  }
+
+  CX.restore();
+}
+
+function drawCheck(cx, cy, R){
+  const isFail = G.result === 'fail';
+  const stormColor = G.storm || G.merciStorm;
+  const pal = getPal();
+  const goodW = getGoodW();
+  const greatW = getGreatW();
+
+  const baseAlpha = (G.holdTimer > 0) ? 1 : G.zoneAlpha;
+
+  CX.globalAlpha = baseAlpha;
+  CX.beginPath();
+  CX.arc(cx, cy, R, 0, Math.PI*2);
+  CX.fillStyle = 'rgba(0,0,0,0.35)';
+  CX.fill();
+  CX.strokeStyle = G.merciStorm
+    ? 'rgba(200,30,30,0.7)'
+    : (G.storm ? 'rgba(150,110,40,0.5)' : 'rgba(60,60,60,0.6)');
+  CX.lineWidth = 2;
+  CX.stroke();
+
+  if(G.zoneAlpha > 0.01 || G.holdTimer > 0){
+    const z0 = G.zStart - Math.PI/2;
+    const z1 = z0 + goodW * Math.PI * 2;
+    CX.globalAlpha = baseAlpha;
+    CX.beginPath();
+    CX.arc(cx, cy, R, z0, z1);
+    CX.strokeStyle = isFail ? '#2a2a2a' : pal.good;
+    CX.lineWidth = ZONE_THICK;
+    CX.stroke();
+
+    const g0 = G.gStart - Math.PI/2;
+    const g1 = g0 + greatW * Math.PI * 2;
+    CX.beginPath();
+    CX.arc(cx, cy, R, g0, g1);
+    CX.strokeStyle = isFail ? '#2a2a2a' : pal.great;
+    CX.lineWidth = ZONE_THICK;
+    CX.stroke();
+  }
+  CX.globalAlpha = 1;
+
+  if(G.cursorActive || G.holdTimer > 0 || G.result === 'fail' || G.stormEndFade){
+    let displayAngle = G.cursorAngle;
+    if(G.holdTimer > 0) displayAngle = G.holdAngle;
+
+    const a = displayAngle - Math.PI/2;
+    const cos = Math.cos(a), sin = Math.sin(a);
+
+    if(G.holdTimer <= 0 && !G.stormEndFade){
+      for(let i = 0; i < G.trail.length; i++){
+        const trailA = G.trail[i].angle - Math.PI/2;
+        const trailAlpha = (1 - (i + 1) / (G.trail.length + 1)) * 0.3;
+        CX.beginPath();
+        CX.arc(cx + Math.cos(trailA) * R, cy + Math.sin(trailA) * R, 2.5 * (1 - i * 0.2), 0, Math.PI*2);
+        CX.fillStyle = G.merciStorm
+          ? `rgba(255,80,80,${trailAlpha})`
+          : (G.storm
+              ? `rgba(200,160,60,${trailAlpha})`
+              : `rgba(180,180,180,${trailAlpha})`);
+        CX.fill();
+      }
+    }
+
+    CX.beginPath();
+    CX.moveTo(cx + cos * (R - ARROW_BACK), cy + sin * (R - ARROW_BACK));
+    CX.lineTo(cx + cos * (R + ARROW_FORWARD), cy + sin * (R + ARROW_FORWARD));
+    CX.strokeStyle = pal.cursor;
+    CX.lineWidth = ARROW_WIDTH;
+    CX.stroke();
+  }
+
+  if(G.failCursorActive && G.failCursorAlpha > 0){
+    const startPos = {x: cx + Math.cos(G.failCursorAngle - Math.PI/2) * R, y: cy + Math.sin(G.failCursorAngle - Math.PI/2) * R};
+    const t = 1 - G.failCursorAlpha;
+    const fx = startPos.x + G.failCursorVx * t * 0.5;
+    const fy = startPos.y + G.failCursorVy * t * 0.5;
+
+    CX.globalAlpha = G.failCursorAlpha;
+    CX.save();
+    CX.translate(fx, fy);
+    CX.rotate(G.failCursorRot);
+    CX.fillStyle = pal.cursor;
+    CX.fillRect(-6, -1, 12, 2);
+    CX.restore();
+    CX.globalAlpha = 1;
+  }
+}
+
+function requestFullscreen(){
+  const el = document.documentElement;
+  try {
+    if(el.requestFullscreen) el.requestFullscreen().catch(function(){});
+    else if(el.webkitRequestFullscreen) el.webkitRequestFullscreen();
+    else if(el.mozRequestFullScreen) el.mozRequestFullScreen();
+    else if(el.msRequestFullscreen) el.msRequestFullscreen();
+  } catch(e){}
+}
+
+function startGame(){
+  G.phase = 'playing';
+  G.stormMissStreak = 0;
+  G.pendingMerci = false;
+  G.merciStorm = false;
+  G.merciProgress = 0;
+  G.merciRotationDir = 0;
+  G.cursorSpeed = CURSOR_SPEED;
+  G.nextCheckTimer = 1.0;
+}
+
+let startTriggered = false;
+function onStartPress(){
+  if(startTriggered) return;
+  startTriggered = true;
+
+  requestFullscreen();
+
+  startBtn.classList.add('pressed');
+  setTimeout(() => startBtn.classList.remove('pressed'), 150);
+
+  setTimeout(() => {
+    startBtn.classList.add('fading');
+  }, 600);
+
+  setTimeout(() => {
+    startBtn.classList.add('hidden');
+    startGame();
+  }, 1400);
+}
+
+startBtn.addEventListener('click', function(e){
+  e.preventDefault();
+  onStartPress();
+});
+startBtn.addEventListener('touchend', function(e){
+  e.preventDefault();
+  onStartPress();
+}, {passive:false});
+
+let activeTouches = 0;
+let touchStormTriggered = false;
+
+document.addEventListener('touchstart', function(e){
+  if(G.phase !== 'playing') return;
+  if(e.target !== CV) return;
+  activeTouches = e.touches.length;
+
+  if(activeTouches >= 2){
+    e.preventDefault();
+    if(!touchStormTriggered){
+      touchStormTriggered = true;
+      manualStorm();
+    }
+  }
+}, {passive:false});
+
+document.addEventListener('touchend', function(e){
+  activeTouches = e.touches.length;
+  if(activeTouches === 0) touchStormTriggered = false;
+}, {passive:false});
+
+document.addEventListener('touchcancel', function(e){
+  activeTouches = e.touches.length;
+  if(activeTouches === 0) touchStormTriggered = false;
+}, {passive:false});
+
+CV.addEventListener('pointerdown', function(e){
+  if(G.phase !== 'playing') return;
+  e.preventDefault();
+  tap();
+});
+
+window.addEventListener('keydown', function(e){
+  if(G.phase !== 'playing') return;
+  if(e.key === 'F1'){
+    e.preventDefault();
+    manualStorm();
+    return;
+  }
+  e.preventDefault();
+  tap();
+});
+
+function tap(){
+  if(G.phase !== 'playing') return;
+  if(G.paused) return;
+  if(!G.cursorActive) return;
+  if(G.result) return;
+  if(G.tapCooldown > 0) return;
+  resolveCheck();
+}
+
+let lastTime = 0, acc = 0;
+const DT = 1/60;
+
+function loop(ts){
+  if(!lastTime) lastTime = ts;
+  let dt = (ts - lastTime) / 1000;
+  lastTime = ts;
+  dt = Math.min(dt, 0.1);
+  acc += dt;
+  while(acc >= DT){
+    update(DT);
+    acc -= DT;
+  }
+  draw();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
